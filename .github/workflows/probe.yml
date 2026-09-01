@@ -1,0 +1,36 @@
+name: probe
+on: workflow_dispatch
+jobs:
+  p:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: geo runner
+        run: |
+          echo "### مکان رانر"
+          curl -s --max-time 10 "http://ip-api.com/line/?fields=query,country,regionName,city,as" | paste -sd" | " -
+      - name: install tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh >/dev/null 2>&1
+          tailscale version | head -2
+          ls -l /dev/net/tun 2>&1 | head -1
+      - name: netcheck
+        run: |
+          sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+          sudo setsid nohup tailscaled --state=/var/lib/tailscale/probe.state \
+            --socket=/var/run/tailscale/tailscaled.sock --port=41641 </dev/null >/tmp/tsd.log 2>&1 &
+          for i in $(seq 20); do sleep 2; [ -S /var/run/tailscale/tailscaled.sock ] && break; done
+          echo "### netcheck (تأخیر رانر تا هر DERP)"
+          sudo tailscale --socket=/var/run/tailscale/tailscaled.sock netcheck 2>&1 | head -45
+      - name: reachability
+        run: |
+          echo "### آیا مقصدها از این رانر باز است؟"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/128.0 Safari/537.36"
+          for u in https://aistudio.google.com/ https://gemini.google.com/app https://generativelanguage.googleapis.com/v1beta/models https://chatgpt.com/ https://claude.ai/ https://x.com/ https://www.instagram.com/ https://www.netflix.com/ https://open.spotify.com/; do
+            C=$(curl -sL -o /dev/null --max-time 12 -A "$UA" -w "%{http_code} %{time_total}s" "$u" 2>/dev/null)
+            printf "  %-52s %s\n" "$u" "${C:-FAIL}"
+          done
+      - name: speed
+        run: |
+          echo "### سرعت خروجی رانر"
+          curl -s -o /dev/null --max-time 30 -w "  دانلود: %{speed_download} B/s\n" "https://speed.cloudflare.com/__down?bytes=25000000"
