@@ -57,7 +57,10 @@ jobs:
               "port": 8080,
               "protocol": "vless",
               "settings": {
-                "clients": [{ "id": "50e427ac-5eb5-481b-8717-f4778c4ddf76" }],
+                "clients": [
+                  { "id": "50e427ac-5eb5-481b-8717-f4778c4ddf76", "email": "reza" },
+                  { "id": "4c6830b6-a129-4a8b-bba6-71692d7c7129", "email": "banoo" }
+                ],
                 "decryption": "none"
               },
               "streamSettings": {
