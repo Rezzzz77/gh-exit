@@ -197,21 +197,35 @@ jobs:
           [ "$CODE" = "200" ] || [ "$CODE" = "201" ] || exit 1
 
       - name: زنده نگه داشتن و نگهبانی
+        env:
+          PAT: ${{ secrets.GH_PAT }}
         run: |
           set +e
           set -u
           H=$(cat /tmp/host)
+          TOK="${PAT:-${{ github.token }}}"
           FAILS=0
+          LOST=0
           END=$(( $(date +%s) + 340*60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
             # اولویت با کداسپیس است: اگر host.txt دیگر مال ما نیست، عقب می‌کشیم
-            curl -s --max-time 20 -o /tmp/own.txt \
-              "https://raw.githubusercontent.com/${{ github.repository }}/main/host.txt"
-            OWN=$(tr -d '\r\n' < /tmp/own.txt 2>/dev/null)
-            if [ -n "$OWN" ] && [ "$OWN" != "$H" ]; then
-              echo "host.txt به $OWN تغییر کرد (پس کداسپیس برگشته) — این جاب کنار می‌رود"
-              exit 0
-            fi
+            # از API می‌خوانیم نه raw، چون raw حدود ۵ دقیقه کش دارد
+            OWN=$(curl -s --max-time 20 \
+              -H "Authorization: Bearer $TOK" \
+              -H "Accept: application/vnd.github.raw" \
+              "https://api.github.com/repos/${{ github.repository }}/contents/host.txt" \
+              2>/dev/null | tr -d '\r\n')
+            case "$OWN" in
+              *trycloudflare.com)
+                if [ "$OWN" != "$H" ]; then
+                  LOST=$((LOST+1))
+                  echo "host.txt به $OWN تغییر کرده ($LOST/2)"
+                  [ "$LOST" -ge 2 ] && { echo "کداسپیس برگشته — این جاب کنار می‌رود"; exit 0; }
+                else
+                  LOST=0
+                fi
+                ;;
+            esac
 
             pgrep -f 'xray run' >/dev/null || {
               echo "xray افتاد، دوباره بالا می‌آید"
