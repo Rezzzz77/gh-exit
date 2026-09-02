@@ -13,6 +13,47 @@ TOKF=$HOME/.ghpat
 
 log(){ echo "$(date -u +%H:%M:%S) $*" >> $LOG; }
 
+# کانفیگ بک‌اند را هر بار می‌نویسیم تا فهرست کاربران همیشه به‌روز باشد
+# ۱) کاربر اصلی  ۲) کاربر دوم (خانم)
+write_conf(){
+  mkdir -p $D
+  cat > $D/be.json <<'JSON'
+{
+  "log": {"loglevel": "warning", "access": "none"},
+  "inbounds": [{
+    "port": 8080,
+    "listen": "0.0.0.0",
+    "protocol": "vless",
+    "settings": {
+      "clients": [
+        {"id": "50e427ac-5eb5-481b-8717-f4778c4ddf76", "email": "reza"},
+        {"id": "4c6830b6-a129-4a8b-bba6-71692d7c7129", "email": "banoo"}
+      ],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "ws",
+      "security": "none",
+      "wsSettings": {"path": "/tun"}
+    },
+    "sniffing": {"enabled": true, "destOverride": ["http", "tls"]}
+  }],
+  "outbounds": [
+    {"protocol": "freedom", "tag": "direct",
+     "settings": {"domainStrategy": "UseIPv4"}},
+    {"protocol": "blackhole", "tag": "block"}
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {"type": "field", "ip": ["geoip:private"], "outboundTag": "block"},
+      {"type": "field", "port": "25,465,587", "outboundTag": "block"}
+    ]
+  }
+}
+JSON
+}
+
 publish(){
   local h="$1"
   [ -s "$TOKF" ] || { log "توکن نیست، انتشار رد شد"; return 1; }
@@ -116,6 +157,7 @@ reclaim(){
 
 log "=== ناظر شروع شد ==="
 FAILS=0
+write_conf
 start_xray
 start_tunnel
 
