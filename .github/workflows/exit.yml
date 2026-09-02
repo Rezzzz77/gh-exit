@@ -87,11 +87,9 @@ jobs:
           sleep 4
           pgrep -f 'xray run' >/dev/null && echo "xray بالا آمد" || { cat /tmp/be.log; exit 1; }
 
-      - name: بالا آوردن تونل و انتشار میزبان
-        env:
-          PAT: ${{ secrets.GH_PAT }}
+      - name: بالا آوردن تونل
         run: |
-          set +e            # curl روی میزبان تازه موقتاً DNS خطا می‌دهد؛ نباید جاب بمیرد
+          set +e
           set -u
           : > /tmp/cf.log
           setsid nohup /tmp/cloudflared tunnel --url http://127.0.0.1:8080 \
@@ -108,27 +106,80 @@ jobs:
           echo "میزبان تونل: $H"
           echo "$H" > /tmp/host
 
-          # صبر تا DNS میزبان تازه منتشر شود و تونل WebSocket بدهد
+          # منتظر ثبت اتصال تونل بمان (معیار واقعی سلامت تونل)
+          for i in $(seq 1 20); do
+            grep -qi 'Registered tunnel connection' /tmp/cf.log && break
+            sleep 3
+          done
+          N=$(grep -ci 'Registered tunnel connection' /tmp/cf.log)
+          echo "اتصال‌های ثبت‌شده تونل: $N"
+          [ "$N" -ge 1 ] || { echo "تونل وصل نشد"; tail -20 /tmp/cf.log; exit 1; }
+
+      - name: سلامت محلی xray
+        run: |
+          set +e
+          C=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 10 \
+              -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+              -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+              -H 'Sec-WebSocket-Version: 13' "http://127.0.0.1:8080/tun")
+          echo "سلامت محلی xray: $C  (۱۰۱ = سالم)"
+          [ "$C" = "101" ] || { cat /tmp/be.log; exit 1; }
+
+      - name: تشخیص سلامت عمومی (غیرکشنده)
+        run: |
+          set +e
+          H=$(cat /tmp/host)
+          echo "--- resolve با DNS سیستم ---"
+          getent hosts "$H" || echo "  DNS سیستم resolve نکرد"
+          echo "--- resolve با 1.1.1.1 ---"
+          curl -s --max-time 12 -o /tmp/dns.json -H 'accept: application/dns-json' \
+               "https://1.1.1.1/dns-query?name=$H&type=A"
+          IP=$(python3 -c "
+          import json
+          try:
+              d=json.load(open('/tmp/dns.json'))
+              print(' '.join(a['data'] for a in d.get('Answer',[]) if a.get('type')==1))
+          except Exception: print('')" 2>/dev/null)
+          echo "  IP از کلودفلر: ${IP:-هیچ}"
+          printf '%s' "$IP" | awk '{print $1}' > /tmp/hostip
+
+          echo "--- آزمون WebSocket عمومی ---"
           C=000
-          for i in $(seq 1 30); do
+          for i in $(seq 1 10); do
             OUT=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
                 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
                 -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
                 -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
-            RC=$?
-            [ $RC -eq 0 ] && C=$OUT
+            [ $? -eq 0 ] && C=$OUT
             [ "$C" = "101" ] && break
-            sleep 4
+            P=$(cat /tmp/hostip 2>/dev/null)
+            if [ -n "$P" ]; then
+              OUT=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
+                  --resolve "$H:443:$P" \
+                  -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+                  -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                  -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
+              [ $? -eq 0 ] && C=$OUT
+              [ "$C" = "101" ] && { echo "  با --resolve سالم شد"; break; }
+            fi
+            sleep 5
           done
-          echo "سلامت تونل: ${C:-000}  (۱۰۱ = سالم)"
-          [ "$C" = "101" ] || { echo "تونل سرویس نمی‌دهد"; exit 1; }
+          echo "سلامت عمومی از دید رانر: $C"
+          echo "(اگر ۰۰۰ باشد مشکلی نیست — رانرهای گیت‌هاب به تونل خودشان دسترسی ندارند؛ داوری نهایی با گوشی است)"
+          tail -8 /tmp/cf.log
 
-          # انتشار در host.txt تا ورکر ثابت این رانر را پیدا کند
+      - name: انتشار میزبان در host.txt
+        env:
+          PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set +e
+          set -u
+          H=$(cat /tmp/host)
           TOK="${PAT:-${{ github.token }}}"
           B64=$(printf '%s\n' "$H" | base64 -w0)
           curl -s --max-time 40 -o /tmp/cur.json \
             -H "Authorization: Bearer $TOK" \
-            "https://api.github.com/repos/${{ github.repository }}/contents/host.txt" || true
+            "https://api.github.com/repos/${{ github.repository }}/contents/host.txt"
           SHA=$(python3 -c "
           import json
           try: print(json.load(open('/tmp/cur.json')).get('sha',''))
@@ -153,6 +204,15 @@ jobs:
           FAILS=0
           END=$(( $(date +%s) + 340*60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
+            # اولویت با کداسپیس است: اگر host.txt دیگر مال ما نیست، عقب می‌کشیم
+            curl -s --max-time 20 -o /tmp/own.txt \
+              "https://raw.githubusercontent.com/${{ github.repository }}/main/host.txt"
+            OWN=$(tr -d '\r\n' < /tmp/own.txt 2>/dev/null)
+            if [ -n "$OWN" ] && [ "$OWN" != "$H" ]; then
+              echo "host.txt به $OWN تغییر کرد (پس کداسپیس برگشته) — این جاب کنار می‌رود"
+              exit 0
+            fi
+
             pgrep -f 'xray run' >/dev/null || {
               echo "xray افتاد، دوباره بالا می‌آید"
               setsid nohup /tmp/xb/xray run -c /tmp/xb/be.json </dev/null >>/tmp/be.log 2>&1 &
@@ -162,15 +222,19 @@ jobs:
             OUT=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 15 \
                 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
                 -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-                -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
+                -H 'Sec-WebSocket-Version: 13' "http://127.0.0.1:8080/tun" 2>/dev/null)
             [ $? -eq 0 ] && C=$OUT
+            if ! pgrep -x cloudflared >/dev/null; then
+              echo "cloudflared افتاد — جاب تمام می‌شود تا زنجیره تازه بسازد"
+              break
+            fi
             if [ "$C" != "101" ]; then
               FAILS=$((FAILS+1))
               echo "$(date -u +%H:%M:%S) سلامت خراب (کد=$C) شماره $FAILS"
-              [ "$FAILS" -ge 4 ] && { echo "تونل مرد، جاب تمام می‌شود تا زنجیره جدید بسازد"; break; }
+              [ "$FAILS" -ge 4 ] && { echo "بک‌اند مرد، جاب تمام می‌شود"; break; }
             else
               FAILS=0
-              echo "$(date -u +%H:%M:%S) سالم"
+              echo "$(date -u +%H:%M:%S) سالم | میزبان $H"
             fi
             sleep 120
           done
