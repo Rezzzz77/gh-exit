@@ -20,6 +20,8 @@ REPO=Rezzzz77/gh-exit
 TOKF=$HOME/.ghpat
 OVERLAP=420          # چند ثانیه تونل قدیمی زنده بماند (کش CDN حدود ۵ دقیقه)
 MAXFAIL=6            # شش خرابی پیاپی (~۴.۵ دقیقه) تا جایگزینی تونل
+PUBHOST=gh.arshadirad7475.workers.dev
+PUBEVERY=4           # آزمون عمومی هر چند دور (۴ × ۴۵ث ≈ ۳ دقیقه) تا 429 نخوریم
 
 log(){ echo "$(date -u +%H:%M:%S) $*" >> $LOG; }
 
@@ -107,6 +109,16 @@ ws101(){   # آزمون دست‌دادن وب‌سوکت روی یک میزبا
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
     -H 'Sec-WebSocket-Version: 13' "https://$1/tun" 2>/dev/null
+}
+
+# آزمون محلی: مستقیم روی خود xray، بدون رد شدن از کلادفلر.
+# این سنجه هیچ‌وقت محدود (429) نمی‌شود و سلامت واقعی بک‌اند را می‌گوید.
+ws101_local(){
+  curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 8 \
+    -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+    -H 'Sec-WebSocket-Version: 13' \
+    -H "Host: $PUBHOST" "http://127.0.0.1:8080/tun" 2>/dev/null
 }
 
 # یک تونل تازه می‌سازد و «pid host» را چاپ می‌کند.
@@ -227,7 +239,9 @@ if ! adopt; then
   until rotate; do log "تلاش مجدد برای بالا آوردن تونل"; sleep 20; done
 fi
 
+ROUND=0
 while :; do
+  ROUND=$((ROUND+1))
   write_conf
   start_xray
   keepalive
@@ -240,20 +254,41 @@ while :; do
     continue
   fi
 
+  # مرحله یک: سلامت محلی بک‌اند. اگر این خراب باشد ایراد واقعی از xray است.
+  L=$(ws101_local)
+  if [ "$L" != "101" ]; then
+    log "xray محلی جواب نداد (کد=$L) → ری‌استارت xray"
+    pkill -f 'xray run -c .*be.json' 2>/dev/null
+    sleep 3
+    start_xray
+    sleep 45
+    continue
+  fi
+
+  # مرحله دو: مسیر عمومی — فقط هر چند دور، وگرنه کلادفلر 429 می‌دهد.
   TH=$(cat $HOSTFILE 2>/dev/null)
-  if [ -n "$TH" ]; then
+  if [ -n "$TH" ] && [ $((ROUND % PUBEVERY)) -eq 0 ]; then
     C=$(ws101 "$TH")
-    if [ "$C" != "101" ]; then
-      FAILS=$((FAILS+1))
-      log "سلامت تونل خراب (کد=$C) شماره $FAILS"
-      if [ "$FAILS" -ge "$MAXFAIL" ]; then
-        log "$MAXFAIL خرابی پیاپی → جایگزینی نرم تونل"
-        rotate || { log "جایگزینی نشد"; sleep 20; }
-      fi
-    else
-      FAILS=0
-      reclaim "$TH"
-    fi
+    case "$C" in
+      101)
+        FAILS=0
+        reclaim "$TH"
+        ;;
+      429|403|503)
+        # محدودیت نرخ یا سپر کلادفلر در برابر خود ما — تونل سالم است.
+        # بک‌اند محلی بالا است، پس هیچ کاری نمی‌کنیم.
+        log "آزمون عمومی کد=$C (محدودیت نرخ) — نادیده گرفته شد"
+        FAILS=0
+        ;;
+      *)
+        FAILS=$((FAILS+1))
+        log "سلامت تونل خراب (کد=$C) شماره $FAILS"
+        if [ "$FAILS" -ge "$MAXFAIL" ]; then
+          log "$MAXFAIL خرابی پیاپی → جایگزینی نرم تونل"
+          rotate || { log "جایگزینی نشد"; sleep 20; }
+        fi
+        ;;
+    esac
   fi
   sleep 45
 done
