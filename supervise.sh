@@ -86,15 +86,30 @@ keepalive(){
 
 # اگر گره پشتیبان (Actions) میزبان را دزدیده باشد، کداسپیس آن را پس می‌گیرد
 # چون پینگ آمستردام برای ایران بهتر از رانر آمریکا است.
+# توجه: raw.githubusercontent حدود پنج دقیقه کش دارد و مقدار قدیمی می‌دهد؛
+# با آن نباید داوری کرد وگرنه حلقهٔ بی‌پایان کامیت می‌سازد. از API می‌خوانیم.
+LAST_RECLAIM=0
 reclaim(){
   local mine="$1"
   [ -n "$mine" ] || return 0
-  local live
+  [ -s "$TOKF" ] || return 0
+  local now
+  now=$(date +%s)
+  # حداقل پنج دقیقه فاصله بین دو بار پس‌گیری
+  [ $(( now - LAST_RECLAIM )) -lt 300 ] && return 0
+  local tok live
+  tok=$(cat $TOKF)
   live=$(curl -s --max-time 20 \
-        "https://raw.githubusercontent.com/$REPO/main/host.txt" 2>/dev/null | tr -d '\r\n')
-  [ -n "$live" ] || return 0
+        -H "Authorization: Bearer $tok" \
+        -H "Accept: application/vnd.github.raw" \
+        "https://api.github.com/repos/$REPO/contents/host.txt" 2>/dev/null | tr -d '\r\n')
+  case "$live" in
+    *trycloudflare.com) : ;;
+    *) return 0 ;;   # پاسخ معتبر نبود، دست نمی‌زنیم
+  esac
   if [ "$live" != "$mine" ]; then
     log "host.txt مال $live بود → کداسپیس پس می‌گیرد"
+    LAST_RECLAIM=$now
     publish "$mine" && echo "$mine" > $HOME/tunnel-host.prev
   fi
 }
