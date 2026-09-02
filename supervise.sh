@@ -84,6 +84,21 @@ keepalive(){
   touch $HOME/.keepalive
 }
 
+# اگر گره پشتیبان (Actions) میزبان را دزدیده باشد، کداسپیس آن را پس می‌گیرد
+# چون پینگ آمستردام برای ایران بهتر از رانر آمریکا است.
+reclaim(){
+  local mine="$1"
+  [ -n "$mine" ] || return 0
+  local live
+  live=$(curl -s --max-time 20 \
+        "https://raw.githubusercontent.com/$REPO/main/host.txt" 2>/dev/null | tr -d '\r\n')
+  [ -n "$live" ] || return 0
+  if [ "$live" != "$mine" ]; then
+    log "host.txt مال $live بود → کداسپیس پس می‌گیرد"
+    publish "$mine" && echo "$mine" > $HOME/tunnel-host.prev
+  fi
+}
+
 log "=== ناظر شروع شد ==="
 FAILS=0
 start_xray
@@ -111,6 +126,7 @@ while :; do
       fi
     else
       FAILS=0
+      reclaim "$TH"
     fi
   fi
   sleep 45
