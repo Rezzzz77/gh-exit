@@ -191,11 +191,32 @@ FAILS=0
 write_conf
 start_xray
 
-# تونل‌های به‌جامانده از اجرای قبلی را پاک کن، بعد یکی تازه بساز
-pkill -x cloudflared 2>/dev/null
-rm -f $CFPID
-sleep 2
-until rotate; do log "تلاش مجدد برای بالا آوردن تونل"; sleep 20; done
+# تحویل گرفتن تونل سالم قبلی: اگر میزبان قبلی هنوز ۱۰۱ می‌دهد و فرایندش زنده است
+# دست به آن نمی‌زنیم. این‌طور ری‌استارت ناظر برای کاربر قطعی نمی‌سازد.
+adopt(){
+  local ph pp c
+  ph=$(cat $HOSTFILE 2>/dev/null)
+  [ -n "$ph" ] || return 1
+  pp=$(cat $CFPID 2>/dev/null)
+  if [ -z "$pp" ] || ! kill -0 "$pp" 2>/dev/null; then
+    # فرایند را از فهرست پیدا کن (تک تونل)
+    pp=$(pgrep -x cloudflared | head -1)
+  fi
+  [ -n "$pp" ] || return 1
+  c=$(ws101 "$ph")
+  [ "$c" = "101" ] || return 1
+  echo "$pp" > $CFPID
+  log "تونل سالم قبلی تحویل گرفته شد: $ph (pid $pp)"
+  reclaim "$ph"
+  return 0
+}
+
+if ! adopt; then
+  pkill -x cloudflared 2>/dev/null
+  rm -f $CFPID
+  sleep 2
+  until rotate; do log "تلاش مجدد برای بالا آوردن تونل"; sleep 20; done
+fi
 
 while :; do
   start_xray
