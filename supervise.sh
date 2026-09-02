@@ -23,10 +23,11 @@ MAXFAIL=6            # شش خرابی پیاپی (~۴.۵ دقیقه) تا جا�
 
 log(){ echo "$(date -u +%H:%M:%S) $*" >> $LOG; }
 
-# ── کانفیگ بک‌اند: هر بار نوشته می‌شود تا فهرست کاربران به‌روز باشد ──
+# کانفیگ بک‌اند: هر بار نوشته می‌شود تا فهرست کاربران به‌روز باشد
+# اگر محتوا عوض شد، xray باید ری‌استارت شود وگرنه کاربر جدید را نمی‌شناسد
 write_conf(){
   mkdir -p $D
-  cat > $D/be.json <<'JSON'
+  cat > $D/be.new <<'JSON'
 {
   "log": {"loglevel": "warning", "access": "none"},
   "inbounds": [{
@@ -61,6 +62,14 @@ write_conf(){
   }
 }
 JSON
+  if [ -f $D/be.json ] && cmp -s $D/be.new $D/be.json; then
+    rm -f $D/be.new
+    return 0
+  fi
+  mv $D/be.new $D/be.json
+  log "کانفیگ بک‌اند عوض شد → ری‌استارت xray"
+  pkill -f 'xray run -c .*be.json' 2>/dev/null
+  sleep 2
 }
 
 publish(){
@@ -219,6 +228,7 @@ if ! adopt; then
 fi
 
 while :; do
+  write_conf
   start_xray
   keepalive
 
