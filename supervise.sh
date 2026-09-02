@@ -23,15 +23,29 @@ MAXFAIL=6            # شش خرابی پیاپی (~۴.۵ دقیقه) تا جا�
 PUBHOST=gh.arshadirad7475.workers.dev
 PUBEVERY=4           # آزمون عمومی هر چند دور (۴ × ۴۵ث ≈ ۳ دقیقه) تا 429 نخوریم
 
+# ── ورکر نسل دو ─────────────────────────────────────────────────────────
+# میزبان تونل را همان لحظه به ورکر می‌دهیم (KV، بدون کش). host.txt در ریپو
+# فقط پشتیبان می‌ماند. کلید انتشار در $HOME/.gh2key است.
+W2=gh2.arshadirad7475.workers.dev
+K2F=$HOME/.gh2key
+
+# ── خودخاموش‌کن برای صرفه‌جویی سهمیه ────────────────────────────────────
+# اگر IDLE_STOP=1 باشد و به اندازه IDLE_MIN دقیقه هیچ ترافیک واقعی نیامده
+# باشد، کداسپیس خودش را خاموش می‌کند. کاربر قطع نمی‌شود چون ورکر نسل دو
+# خودش لایه دوم را سرو می‌کند.
+IDLE_STOP=${IDLE_STOP:-1}
+IDLE_MIN=${IDLE_MIN:-25}
+ACCLOG=$D/access.log
+
 log(){ echo "$(date -u +%H:%M:%S) $*" >> $LOG; }
 
 # کانفیگ بک‌اند: هر بار نوشته می‌شود تا فهرست کاربران به‌روز باشد
 # اگر محتوا عوض شد، xray باید ری‌استارت شود وگرنه کاربر جدید را نمی‌شناسد
 write_conf(){
   mkdir -p $D
-  cat > $D/be.new <<'JSON'
+  cat > $D/be.new <<JSON
 {
-  "log": {"loglevel": "warning", "access": "none"},
+  "log": {"loglevel": "warning", "access": "$ACCLOG"},
   "inbounds": [{
     "port": 8080,
     "listen": "0.0.0.0",
@@ -74,9 +88,22 @@ JSON
   sleep 2
 }
 
+# انتشار فوری روی ورکر نسل دو (KV، بدون کش CDN)
+pub_worker(){
+  local h="$1" k code
+  [ -s "$K2F" ] || return 1
+  k=$(tr -d '\n' < $K2F)
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+        "https://$W2/pub?k=$k&h=$h" 2>/dev/null)
+  log "انتشار روی ورکر $h → HTTP $code"
+  [ "$code" = "200" ]
+}
+
 publish(){
   local h="$1"
-  [ -s "$TOKF" ] || { log "توکن نیست، انتشار رد شد"; return 1; }
+  # اول ورکر: فوری اثر می‌کند. بعد ریپو: پشتیبان و پایدار.
+  pub_worker "$h"
+  [ -s "$TOKF" ] || { log "توکن نیست، انتشار در ریپو رد شد"; return 1; }
   local tok sha b64 body code
   tok=$(cat $TOKF)
   b64=$(printf '%s\n' "$h" | base64 -w0)
@@ -93,8 +120,49 @@ publish(){
         -H "Content-Type: application/json" \
         -d "$body" \
         "https://api.github.com/repos/$REPO/contents/host.txt")
-  log "انتشار $h → HTTP $code"
+  log "انتشار در ریپو $h → HTTP $code"
   [ "$code" = "200" ] || [ "$code" = "201" ]
+}
+
+# ── سنجش بیکاری و خودخاموشی ────────────────────────────────────────────
+# لاگ دسترسی xray فقط با ترافیک واقعی VLESS رشد می‌کند. آزمون سلامت
+# (دست‌دادن وب‌سوکت بدون داده) هیچ خطی نمی‌نویسد، پس معیار تمیزی است.
+LAST_ACT=$(date +%s)
+LAST_SZ=0
+self_stop(){
+  local tok cs code
+  [ -s "$TOKF" ] || { log "توکن نیست، خودخاموشی ممکن نشد"; return 1; }
+  tok=$(cat $TOKF)
+  cs=${CODESPACE_NAME:-}
+  [ -n "$cs" ] || { log "CODESPACE_NAME خالی است"; return 1; }
+  log "بیکاری $IDLE_MIN دقیقه → خاموش کردن کداسپیس برای حفظ سهمیه"
+  # به گوشی خبر بده که لایه دو را سرو کند
+  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X POST \
+        -H "Authorization: Bearer $tok" \
+        -H "Accept: application/vnd.github+json" \
+        "https://api.github.com/user/codespaces/$cs/stop" 2>/dev/null)
+  log "درخواست stop → HTTP $code"
+}
+
+check_idle(){
+  [ "$IDLE_STOP" = "1" ] || return 0
+  local sz now
+  sz=$(stat -c %s "$ACCLOG" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  # لاگ را بیش از ۲۰ مگابایت بزرگ نکن
+  if [ "${sz:-0}" -gt 20000000 ]; then
+    : > "$ACCLOG"
+    sz=0
+  fi
+  if [ "$sz" != "$LAST_SZ" ]; then
+    LAST_SZ=$sz
+    LAST_ACT=$now
+    return 0
+  fi
+  if [ $(( (now - LAST_ACT) / 60 )) -ge "$IDLE_MIN" ]; then
+    self_stop
+    LAST_ACT=$now
+  fi
 }
 
 start_xray(){
@@ -177,7 +245,6 @@ rotate(){
 }
 
 keepalive(){
-  curl -s -o /dev/null --max-time 10 https://www.google.com/generate_204 2>/dev/null
   touch $HOME/.keepalive
 }
 
@@ -245,6 +312,7 @@ while :; do
   write_conf
   start_xray
   keepalive
+  check_idle
 
   CFP=$(cat $CFPID 2>/dev/null)
   if [ -z "$CFP" ] || ! kill -0 "$CFP" 2>/dev/null; then
