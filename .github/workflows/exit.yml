@@ -1,0 +1,185 @@
+name: exit
+# گره خروج پشتیبان روی GitHub Actions
+# ریپو عمومی است ⇒ دقیقه‌های Actions نامحدود و بدون سهمیه، برخلاف کداسپیس.
+# وقتی سهمیه کداسپیس تمام شود، ناظر گوشی این ورک‌فلو را صدا می‌زند و
+# همین آدرس ثابت (gh.arshadirad7475.workers.dev) به این رانر وصل می‌شود.
+# کلاینت هیچ تغییری لازم ندارد چون ورکر میزبان را از host.txt می‌خواند.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "پس از پایان، خودش را دوباره صدا بزند؟ (true/false)"
+        required: false
+        default: "false"
+
+concurrency:
+  group: exit-node
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # سقف یک جاب ۶ ساعت است؛ ۳۵۰ دقیقه حاشیه امن دارد
+
+    steps:
+      - name: مکان رانر
+        run: |
+          curl -s --max-time 15 -o /tmp/geo.txt \
+            "http://ip-api.com/line/?fields=query,country,city,as" || true
+          echo "رانر: $(paste -sd' | ' /tmp/geo.txt 2>/dev/null)"
+
+      - name: نصب xray و cloudflared
+        run: |
+          set -e
+          cd /tmp
+          curl -sL --max-time 180 -o x.zip \
+            "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+          unzip -q -o x.zip -d /tmp/xb
+          chmod +x /tmp/xb/xray
+          /tmp/xb/xray version | head -1
+
+          curl -sL --max-time 180 -o /tmp/cloudflared \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
+          chmod +x /tmp/cloudflared
+          /tmp/cloudflared --version | head -1
+
+      - name: ساخت کانفیگ بک‌اند
+        run: |
+          cat > /tmp/xb/be.json <<'JSON'
+          {
+            "log": { "loglevel": "warning" },
+            "inbounds": [{
+              "listen": "0.0.0.0",
+              "port": 8080,
+              "protocol": "vless",
+              "settings": {
+                "clients": [{ "id": "50e427ac-5eb5-481b-8717-f4778c4ddf76" }],
+                "decryption": "none"
+              },
+              "streamSettings": {
+                "network": "ws",
+                "wsSettings": { "path": "/tun" }
+              },
+              "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+            }],
+            "outbounds": [
+              { "protocol": "freedom", "tag": "direct",
+                "settings": { "domainStrategy": "UseIPv4" } },
+              { "protocol": "blackhole", "tag": "block" }
+            ],
+            "routing": {
+              "rules": [
+                { "type": "field", "port": "25,465,587", "outboundTag": "block" }
+              ]
+            }
+          }
+          JSON
+          python3 -c "import json;json.load(open('/tmp/xb/be.json'));print('کانفیگ معتبر است')"
+
+      - name: راه‌اندازی xray
+        run: |
+          setsid nohup /tmp/xb/xray run -c /tmp/xb/be.json \
+            </dev/null >/tmp/be.log 2>&1 &
+          sleep 4
+          pgrep -f 'xray run' >/dev/null && echo "xray بالا آمد" || { cat /tmp/be.log; exit 1; }
+
+      - name: بالا آوردن تونل و انتشار میزبان
+        env:
+          PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set -u
+          : > /tmp/cf.log
+          setsid nohup /tmp/cloudflared tunnel --url http://127.0.0.1:8080 \
+            --no-autoupdate --edge-ip-version 4 </dev/null >>/tmp/cf.log 2>&1 &
+
+          H=""
+          for i in $(seq 1 30); do
+            H=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /tmp/cf.log 2>/dev/null | head -1)
+            [ -n "$H" ] && break
+            sleep 2
+          done
+          [ -n "$H" ] || { echo "میزبان تونل پیدا نشد"; tail -20 /tmp/cf.log; exit 1; }
+          H=${H#https://}
+          echo "میزبان تونل: $H"
+          echo "$H" > /tmp/host
+
+          # صبر تا تونل واقعاً WebSocket بدهد
+          for i in $(seq 1 20); do
+            C=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
+                -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+                -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
+            [ "$C" = "101" ] && break
+            sleep 3
+          done
+          echo "سلامت تونل: ${C:-000}  (۱۰۱ = سالم)"
+          [ "$C" = "101" ] || { echo "تونل سرویس نمی‌دهد"; exit 1; }
+
+          # انتشار در host.txt تا ورکر ثابت این رانر را پیدا کند
+          TOK="${PAT:-${{ github.token }}}"
+          B64=$(printf '%s\n' "$H" | base64 -w0)
+          curl -s --max-time 40 -o /tmp/cur.json \
+            -H "Authorization: Bearer $TOK" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/host.txt" || true
+          SHA=$(python3 -c "
+          import json
+          try: print(json.load(open('/tmp/cur.json')).get('sha',''))
+          except Exception: print('')")
+          if [ -n "$SHA" ]; then
+            BODY="{\"message\":\"actions exit $H\",\"content\":\"$B64\",\"sha\":\"$SHA\"}"
+          else
+            BODY="{\"message\":\"actions exit $H\",\"content\":\"$B64\"}"
+          fi
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X PUT \
+            -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+            -d "$BODY" \
+            "https://api.github.com/repos/${{ github.repository }}/contents/host.txt")
+          echo "انتشار میزبان: HTTP $CODE"
+          [ "$CODE" = "200" ] || [ "$CODE" = "201" ] || exit 1
+
+      - name: زنده نگه داشتن و نگهبانی
+        run: |
+          set -u
+          H=$(cat /tmp/host)
+          FAILS=0
+          END=$(( $(date +%s) + 340*60 ))
+          while [ "$(date +%s)" -lt "$END" ]; do
+            pgrep -f 'xray run' >/dev/null || {
+              echo "xray افتاد، دوباره بالا می‌آید"
+              setsid nohup /tmp/xb/xray run -c /tmp/xb/be.json </dev/null >>/tmp/be.log 2>&1 &
+              sleep 3
+            }
+            C=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 15 \
+                -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+                -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
+            if [ "$C" != "101" ]; then
+              FAILS=$((FAILS+1))
+              echo "$(date -u +%H:%M:%S) سلامت خراب (کد=$C) شماره $FAILS"
+              [ "$FAILS" -ge 4 ] && { echo "تونل مرد، جاب تمام می‌شود تا زنجیره جدید بسازد"; break; }
+            else
+              FAILS=0
+              echo "$(date -u +%H:%M:%S) سالم"
+            fi
+            sleep 120
+          done
+
+      - name: ادامه زنجیره
+        if: ${{ always() && github.event.inputs.chain == 'true' }}
+        env:
+          PAT: ${{ secrets.GH_PAT }}
+        run: |
+          if [ -z "${PAT:-}" ]; then
+            echo "سکرت GH_PAT نیست، زنجیره ادامه پیدا نمی‌کند"
+            exit 0
+          fi
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $PAT" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"ref":"main","inputs":{"chain":"true"}}' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/exit.yml/dispatches")
+          echo "صدا زدن جاب بعدی: HTTP $CODE"
