@@ -96,7 +96,12 @@ pub_worker(){
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
         "https://$W2/pub?k=$k&h=$h" 2>/dev/null)
   log "انتشار روی ورکر $h → HTTP $code"
-  [ "$code" = "200" ]
+  # لایه ۱ زنده است → فلگ خاموشی ورکر را پاک کن (اگر خودخاموشی قبلاً گذاشته)
+  if [ "$code" = "200" ]; then
+    curl -s -o /dev/null --max-time 20 "https://$W2/tier1?k=$k&v=0" 2>/dev/null
+    return 0
+  fi
+  return 1
 }
 
 publish(){
@@ -136,6 +141,11 @@ self_stop(){
   cs=${CODESPACE_NAME:-}
   [ -n "$cs" ] || { log "CODESPACE_NAME خالی است"; return 1; }
   log "بیکاری $IDLE_MIN دقیقه → خاموش کردن کداسپیس برای حفظ سهمیه"
+  # به ورکر خبر بده لایه ۱ را کنار بگذارد (سریع‌تر لایه ۲ را سرو می‌کند)
+  if [ -s "$K2F" ]; then
+    k2=$(tr -d '\n' < $K2F)
+    curl -s -o /dev/null --max-time 15 "https://$W2/tier1?k=$k2&v=1" 2>/dev/null
+  fi
   # به گوشی خبر بده که لایه دو را سرو کند
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -X POST \
         -H "Authorization: Bearer $tok" \
