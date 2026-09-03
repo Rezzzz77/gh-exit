@@ -48,8 +48,29 @@ jobs:
           /tmp/cloudflared --version | head -1
 
       - name: ساخت کانفیگ بک‌اند
+        env:
+          VLESS_UUIDS: ${{ secrets.VLESS_UUIDS }}
         run: |
-          cat > /tmp/xb/be.json <<'JSON'
+          mkdir -p /tmp/xb
+          # فهرست کلاینت‌ها از سکرت ساخته می‌شود — هیچ UUID داخل مخزن نیست.
+          # قالب سکرت:  reza:UUID,banoo:UUID   یا فقط  UUID,UUID
+          CLIENTS=$(python3 -c "
+          import os, sys, uuid, json
+          raw = os.environ.get('VLESS_UUIDS', '').strip()
+          items = [p.strip() for p in raw.replace(chr(10), ',').split(',') if p.strip()]
+          out = []
+          for n, it in enumerate(items, 1):
+              nm, _, ident = it.rpartition(':')
+              ident = ident or it
+              uuid.UUID(ident)
+              out.append({'id': ident, 'email': nm or ('u%d' % n)})
+          if not out:
+              sys.exit('سکرت VLESS_UUIDS خالی یا نامعتبر است')
+          print(',\n'.join('        ' + json.dumps(o) for o in out))
+          ")
+          N=$(printf '%s\n' "$CLIENTS" | grep -c '"id"')
+          echo "تعداد کلاینت از سکرت: $N"
+          cat > /tmp/xb/be.json <<JSON
           {
             "log": { "loglevel": "warning" },
             "inbounds": [{
@@ -58,8 +79,7 @@ jobs:
               "protocol": "vless",
               "settings": {
                 "clients": [
-                  { "id": "50e427ac-5eb5-481b-8717-f4778c4ddf76", "email": "reza" },
-                  { "id": "4c6830b6-a129-4a8b-bba6-71692d7c7129", "email": "banoo" }
+          $CLIENTS
                 ],
                 "decryption": "none"
               },
