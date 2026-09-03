@@ -39,9 +39,47 @@ ACCLOG=$D/access.log
 
 log(){ echo "$(date -u +%H:%M:%S) $*" >> $LOG; }
 
+# فهرست کلاینت‌ها هرگز داخل مخزن نیست. از سکرت کداسپیس یا فایل محلی می‌آید.
+#   ترتیب:  $VLESS_UUIDS  →  ~/.vlessids
+#   قالب:   reza:UUID,banoo:UUID   یا فقط  UUID,UUID
+load_clients(){
+  IDS="${VLESS_UUIDS:-}"
+  if [ -z "$IDS" ] && [ -s "$HOME/.vlessids" ]; then IDS=$(cat "$HOME/.vlessids"); fi
+  CLIENTS=""
+  N=0
+  OLDIFS=$IFS
+  IFS=',
+'
+  for it in $IDS; do
+    it=$(printf '%s' "$it" | tr -d ' \t\r')
+    [ -z "$it" ] && continue
+    case "$it" in
+      *:*) nm=${it%%:*}; id=${it##*:} ;;
+      *)   nm="";        id=$it ;;
+    esac
+    ok=1
+    [ ${#id} -eq 36 ] || ok=0
+    case "$id" in *[!0-9a-fA-F-]*) ok=0 ;; esac
+    if [ "$ok" != 1 ]; then log "!! یک شناسه نامعتبر رد شد"; continue; fi
+    N=$((N+1))
+    [ -z "$nm" ] && nm="u$N"
+    if [ -n "$CLIENTS" ]; then CLIENTS="$CLIENTS,
+"; fi
+    CLIENTS="$CLIENTS        {\"id\": \"$id\", \"email\": \"$nm\"}"
+  done
+  IFS=$OLDIFS
+  if [ "$N" -eq 0 ]; then
+    log "!! فهرست کلاینت خالی است — نه VLESS_UUIDS و نه ~/.vlessids. xray بالا نمی‌آید."
+    return 1
+  fi
+  log "فهرست کلاینت: $N کاربر"
+  return 0
+}
+
 # کانفیگ بک‌اند: هر بار نوشته می‌شود تا فهرست کاربران به‌روز باشد
 # اگر محتوا عوض شد، xray باید ری‌استارت شود وگرنه کاربر جدید را نمی‌شناسد
 write_conf(){
+  load_clients || return 1
   mkdir -p $D
   cat > $D/be.new <<JSON
 {
@@ -52,8 +90,7 @@ write_conf(){
     "protocol": "vless",
     "settings": {
       "clients": [
-        {"id": "50e427ac-5eb5-481b-8717-f4778c4ddf76", "email": "reza"},
-        {"id": "4c6830b6-a129-4a8b-bba6-71692d7c7129", "email": "banoo"}
+$CLIENTS
       ],
       "decryption": "none"
     },
