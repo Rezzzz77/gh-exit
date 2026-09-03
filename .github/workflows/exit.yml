@@ -199,6 +199,25 @@ jobs:
           echo "انتشار میزبان: HTTP $CODE"
           [ "$CODE" = "200" ] || [ "$CODE" = "201" ] || exit 1
 
+      - name: اعلام میزبان به ورکر نسل دو (KV فوری)
+        env:
+          GH2_KEY: ${{ secrets.GH2_PUB_KEY }}
+        run: |
+          set +e
+          set -u
+          H=$(cat /tmp/host)
+          if [ -n "${GH2_KEY:-}" ]; then
+            C=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+                "https://gh2.arshadirad7475.workers.dev/pub?k=${GH2_KEY}&h=${H}")
+            echo "pub به ورکر: HTTP $C"
+            # ورکر باید رله را امتحان کند (این تونل لایه ۱ با خروج گیت‌هاب است)
+            curl -s -o /dev/null --max-time 20 \
+                "https://gh2.arshadirad7475.workers.dev/tier1?k=${GH2_KEY}&v=0"
+            echo "tier1 روشن شد (رله به تونل Actions)"
+          else
+            echo "سکرت GH2_PUB_KEY نیست — ورکر از host.txt می‌خواند (تا ۵ دقیقه تأخیر)"
+          fi
+
       - name: زنده نگه داشتن و نگهبانی
         env:
           PAT: ${{ secrets.GH_PAT }}
