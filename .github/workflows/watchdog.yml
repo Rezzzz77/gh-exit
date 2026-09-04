@@ -1,0 +1,94 @@
+name: watchdog
+# نگهبان زمان‌بندی‌شده برای گرهٔ خروج.
+#
+# چرا لازم است: ورک‌فلوی exit فقط با دست (workflow_dispatch) صدا زده می‌شد و
+# سقف هر جاب ۳۵۰ دقیقه است. اگر زنجیره به هر دلیلی پاره شود — جاب لغو شود،
+# GH_PAT منقضی شود، یا رانر خطا بدهد — هیچ‌کس دوباره صدایش نمی‌زند و کاربر
+# تا وقتی خودش متوجه شود بی‌اینترنت می‌ماند.
+#
+# این نگهبان هر ۱۵ دقیقه از بیرون نگاه می‌کند: آیا ورکر یک تونل زنده دارد؟
+# فقط اگر تونل مرده باشد و هیچ جاب exit در حال اجرا نباشد، جاب تازه می‌سازد.
+# پس در حالت سالم هیچ کاری نمی‌کند و دقیقه‌های Actions هدر نمی‌رود.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: watchdog
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: بررسی سلامت و صدا زدن گره در صورت نیاز
+        env:
+          PAT: ${{ secrets.GH_PAT }}
+        run: |
+          set +e
+          W=gh2.arshadirad7475.workers.dev
+          TOK="${PAT:-${{ github.token }}}"
+
+          # ۱) میزبان تونلی که ورکر می‌شناسد
+          HOST=$(curl -s --max-time 20 "https://$W/state" \
+                 | sed -n 's/.*"host": *"\([^"]*\)".*/\1/p')
+          echo "میزبانی که ورکر می‌شناسد: ${HOST:-هیچ}"
+
+          # ۲) آیا آن میزبان واقعاً WebSocket می‌دهد؟
+          #    نکته: در ارتقای موفق، curl کد ۱۰۱ را چاپ می‌کند ولی چون بدنه‌ای
+          #    نمی‌آید تا پایان --max-time صبر می‌کند و با خروجی ۲۸ تمام می‌شود.
+          #    پس هرگز نباید $? دروازهٔ پذیرش کد باشد؛ فقط http_code معتبر است.
+          CODE=000
+          if [ -n "$HOST" ]; then
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 15 \
+                   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+                   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+                   -H 'Sec-WebSocket-Version: 13' "https://$HOST/tun" 2>/dev/null)
+            [ -n "$CODE" ] || CODE=000
+          fi
+          echo "ارتقای WebSocket روی میزبان: $CODE  (۱۰۱ = سالم)"
+
+          if [ "$CODE" = "101" ]; then
+            echo "تونل سالم است — کاری لازم نیست."
+            exit 0
+          fi
+
+          # ۳) شاید جابی همین حالا در حال بالا آمدن است؛ دوباره نساز.
+          #    total_count را مستقیم از JSON برمی‌داریم؛ شمردن رشتهٔ id با grep شکننده است
+          #    چون کلیدهای دیگر پاسخ هم id دارند و شمارش را بی‌معنا می‌کنند.
+          count_runs() {
+            curl -s --max-time 20 \
+              -H "Authorization: Bearer $TOK" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/exit.yml/runs?status=$1&per_page=1" \
+              | tr -d ' ' | grep -o '"total_count":[0-9]*' | head -1 | cut -d: -f2
+          }
+          RUNNING=$(count_runs in_progress)
+          QUEUED=$(count_runs queued)
+          case "$RUNNING" in ''|*[!0-9]*) RUNNING=0;; esac
+          case "$QUEUED"  in ''|*[!0-9]*) QUEUED=0;;  esac
+          echo "جاب در حال اجرا: $RUNNING | در صف: $QUEUED"
+
+          if [ "$RUNNING" -gt 0 ] || [ "$QUEUED" -gt 0 ]; then
+            echo "جاب exit در جریان است — صبر می‌کنیم."
+            exit 0
+          fi
+
+          if [ -z "${PAT:-}" ]; then
+            echo "سکرت GH_PAT نیست؛ نمی‌توان جاب تازه ساخت."
+            exit 1
+          fi
+
+          C=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $PAT" \
+            -H "Accept: application/vnd.github+json" \
+            -d '{"ref":"main","inputs":{"chain":"true"}}' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/exit.yml/dispatches")
+          echo "گرهٔ خروج تازه صدا زده شد: HTTP $C"
+          [ "$C" = "204" ] || exit 1
