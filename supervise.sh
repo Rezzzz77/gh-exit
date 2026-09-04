@@ -37,6 +37,16 @@ IDLE_STOP=${IDLE_STOP:-1}
 IDLE_MIN=${IDLE_MIN:-25}
 ACCLOG=$D/access.log
 
+# ── هاپ دوم WARP ────────────────────────────────────────────────────────
+# claude.ai روی آی‌پی دیتاسنتر آزور چالش کلادفلر می‌خورد، پس فقط دامنه‌های
+# Claude از یک تونل وایرگارد WARP بیرون می‌روند. کلید از سکرت کداسپیس
+# ($WARP_JSON) یا فایل محلی می‌آید؛ اگر نبود، کانفیگ بدون WARP ساخته می‌شود.
+WARPF=$HOME/.warp.json
+if [ -n "${WARP_JSON:-}" ] && [ ! -s "$WARPF" ]; then
+  printf '%s' "$WARP_JSON" > "$WARPF"
+  chmod 600 "$WARPF"
+fi
+
 log(){ echo "$(date -u +%H:%M:%S) $*" >> $LOG; }
 
 # فهرست کلاینت‌ها هرگز داخل مخزن نیست. از سکرت کداسپیس یا فایل محلی می‌آید.
@@ -115,6 +125,30 @@ $CLIENTS
   }
 }
 JSON
+  # دامنه‌های Claude → هاپ WARP (اگر اعتبارنامه موجود باشد)
+  if [ -s "$WARPF" ]; then
+    python3 - "$D/be.new" "$WARPF" <<'PYW' >>$LOG 2>&1
+import json,sys
+cfg,wf=sys.argv[1],sys.argv[2]
+try:
+    w=json.load(open(wf)); c=json.load(open(cfg))
+    if "warp" not in [o.get("tag") for o in c["outbounds"]]:
+        c["outbounds"].append({"protocol":"wireguard","tag":"warp","settings":{
+            "secretKey":w["priv"],
+            "address":[w["v4"]+"/32",w["v6"]+"/128"],
+            "peers":[{"publicKey":w["peer_pub"],"endpoint":w["endpoint"],
+                      "allowedIPs":["0.0.0.0/0","::/0"]}],
+            "reserved":w["reserved"],"mtu":1280,"domainStrategy":"ForceIPv4"}})
+    rules=c["routing"]["rules"]
+    if not any(r.get("outboundTag")=="warp" for r in rules):
+        rules.insert(0,{"type":"field","outboundTag":"warp","domain":[
+            "domain:claude.ai","domain:anthropic.com",
+            "domain:claudeusercontent.com","domain:claude.com"]})
+    json.dump(c,open(cfg,"w"),indent=1)
+except Exception as e:
+    print("warp-inject رد شد: %s"%e)
+PYW
+  fi
   if [ -f $D/be.json ] && cmp -s $D/be.new $D/be.json; then
     rm -f $D/be.new
     return 0
