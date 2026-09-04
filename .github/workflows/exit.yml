@@ -167,22 +167,26 @@ jobs:
           printf '%s' "$IP" | awk '{print $1}' > /tmp/hostip
 
           echo "--- آزمون WebSocket عمومی ---"
+          # نکته مهم: در ارتقای موفق WebSocket، curl کد ۱۰۱ را چاپ می‌کند ولی چون
+          # هیچ بدنه‌ای نمی‌آید تا --max-time به پایان برسد صبر می‌کند و با خروجی ۲۸
+          # تمام می‌شود. پس هرگز نباید خروجی curl را دروازهٔ پذیرش کد کرد؛ فقط
+          # مقدار http_code معتبر است (۰۰۰ = واقعاً وصل نشد).
           C=000
           for i in $(seq 1 10); do
-            OUT=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
+            C=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
                 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
                 -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
                 -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
-            [ $? -eq 0 ] && C=$OUT
+            [ -n "$C" ] || C=000
             [ "$C" = "101" ] && break
             P=$(cat /tmp/hostip 2>/dev/null)
             if [ -n "$P" ]; then
-              OUT=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
+              C=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 12 \
                   --resolve "$H:443:$P" \
                   -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
                   -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
                   -H 'Sec-WebSocket-Version: 13' "https://$H/tun" 2>/dev/null)
-              [ $? -eq 0 ] && C=$OUT
+              [ -n "$C" ] || C=000
               [ "$C" = "101" ] && { echo "  با --resolve سالم شد"; break; }
             fi
             sleep 5
@@ -274,12 +278,14 @@ jobs:
               setsid nohup /tmp/xb/xray run -c /tmp/xb/be.json </dev/null >>/tmp/be.log 2>&1 &
               sleep 3
             }
-            C=000
-            OUT=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 15 \
+            # همان تلهٔ curl: ارتقای موفق ⇒ کد ۱۰۱ ولی خروجی ۲۸. قبلاً همین‌جا
+            # C روی ۰۰۰ می‌ماند، چهار دور پیاپی «خرابی» شمرده می‌شد و جاب سالم
+            # خودش را می‌کشت؛ نتیجه‌اش برای کاربر قطعی هر ~۱۲ دقیقه بود.
+            C=$(curl -s -o /dev/null -w '%{http_code}' --http1.1 --max-time 8 \
                 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
                 -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
                 -H 'Sec-WebSocket-Version: 13' "http://127.0.0.1:8080/tun" 2>/dev/null)
-            [ $? -eq 0 ] && C=$OUT
+            [ -n "$C" ] || C=000
             if ! pgrep -x cloudflared >/dev/null; then
               echo "cloudflared افتاد — جاب تمام می‌شود تا زنجیره تازه بسازد"
               break
