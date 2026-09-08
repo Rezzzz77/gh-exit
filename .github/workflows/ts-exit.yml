@@ -109,19 +109,35 @@ jobs:
           done
           # پایان دور نگهبانی — قبل از کشته‌شدن جاب، جانشین را dispatch کن
           echo "⏳ پایان دور نگهبانی — dispatch نود بعدی..."
-          # ضدچرخش: اگر ران تازه‌ای (<۹۰ دقیقه) از قبل در جریان است، dispatch نکن
-          # (وگرنه concurrency ران تازه را می‌کشد و نود عوض می‌شود)
-          NEWEST=$(curl -s --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/Rezzzz77/gh-exit/actions/workflows/ts-exit.yml/runs?per_page=1" \
-            | grep -o '"created_at": *"[^"]*"' | head -1 | cut -d'"' -f4)
-          SKIP=0
-          if [ -n "$NEWEST" ]; then
-            AGE_MIN=$(( ( $(date -u +%s) - $(date -u -d "$NEWEST" +%s) ) / 60 ))
-            echo "   جدیدترین ران: $AGE_MIN دقیقه پیش"
-            [ "$AGE_MIN" -lt 90 ] && [ "$AGE_MIN" -ge 0 ] && SKIP=1
-          fi
-          if [ "$SKIP" = "1" ]; then
-            echo "⏭️ ران تازه از قبل هست — dispatch لغو شد (جلوگیری از کشتن نود سالم)"
+          # ضدچرخش هوشمند: مقایسه با «زمان باقیمانده» — اگر نود دیگری زنده است و
+          # بیش از ۱۰ دقیقه (۶۰۰ ثانیه) عمر جلو دارد، dispatch نکن تا concurrency آن را نکشد.
+          # (self با GITHUB_RUN_ID مستثنی می‌شود؛ فقط ران‌های in_progress/queued دیگر شمرده می‌شوند)
+          RUNS_JSON=$(curl -s --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/Rezzzz77/gh-exit/actions/workflows/ts-exit.yml/runs?per_page=8" || true)
+          ALIVE=$(printf '%s' "$RUNS_JSON" | ME="${GITHUB_RUN_ID:-0}" python3 -c '
+            import json,sys,os,datetime
+            try:
+                d=json.loads(sys.stdin.read() or "{}")
+            except Exception:
+                d={}
+            me=int(os.environ.get("ME","0") or 0)
+            now=datetime.datetime.now(datetime.timezone.utc)
+            best=0
+            for r in d.get("workflow_runs",[]):
+                if r.get("id")==me or r.get("status") not in ("in_progress","queued"):
+                    continue
+                try:
+                    c=datetime.datetime.fromisoformat(r["created_at"].replace("Z","+00:00"))
+                except Exception:
+                    continue
+                rem=int(20200-(now-c).total_seconds())
+                if rem>best:
+                    best=rem
+            print(best)
+          ')
+          echo "   بیشترین عمر باقی‌ماندهٔ نود دیگر: ${ALIVE:-0} ثانیه"
+          if [ "${ALIVE:-0}" -gt 600 ] 2>/dev/null; then
+            echo "⏭️ نود تازه‌ای با بیش از ۱۰ دقیقه عمر زنده است — dispatch لغو شد (جلوگیری از کشتن نود سالم)"
           else
             for i in 1 2 3; do
               if gh workflow run ts-exit.yml --repo Rezzzz77/gh-exit -f hostname=gh-exit; then
