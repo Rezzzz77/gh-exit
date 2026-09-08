@@ -109,10 +109,25 @@ jobs:
           done
           # پایان دور نگهبانی — قبل از کشته‌شدن جاب، جانشین را dispatch کن
           echo "⏳ پایان دور نگهبانی — dispatch نود بعدی..."
-          for i in 1 2 3; do
-            if gh workflow run ts-exit.yml --repo Rezzzz77/gh-exit -f hostname=gh-exit; then
-              echo "✅ نود جانشین dispatch شد — زنجیره ادامه دارد"
-              break
-            fi
-            echo "dispatch ناموفق (تلاش $i)"; sleep 10
-          done
+          # ضدچرخش: اگر ران تازه‌ای (<۹۰ دقیقه) از قبل در جریان است، dispatch نکن
+          # (وگرنه concurrency ران تازه را می‌کشد و نود عوض می‌شود)
+          NEWEST=$(curl -s --max-time 20 -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/Rezzzz77/gh-exit/actions/workflows/ts-exit.yml/runs?per_page=1" \
+            | grep -o '"created_at": *"[^"]*"' | head -1 | cut -d'"' -f4)
+          SKIP=0
+          if [ -n "$NEWEST" ]; then
+            AGE_MIN=$(( ( $(date -u +%s) - $(date -u -d "$NEWEST" +%s) ) / 60 ))
+            echo "   جدیدترین ران: $AGE_MIN دقیقه پیش"
+            [ "$AGE_MIN" -lt 90 ] && [ "$AGE_MIN" -ge 0 ] && SKIP=1
+          fi
+          if [ "$SKIP" = "1" ]; then
+            echo "⏭️ ران تازه از قبل هست — dispatch لغو شد (جلوگیری از کشتن نود سالم)"
+          else
+            for i in 1 2 3; do
+              if gh workflow run ts-exit.yml --repo Rezzzz77/gh-exit -f hostname=gh-exit; then
+                echo "✅ نود جانشین dispatch شد — زنجیره ادامه دارد"
+                break
+              fi
+              echo "dispatch ناموفق (تلاش $i)"; sleep 10
+            done
+          fi
