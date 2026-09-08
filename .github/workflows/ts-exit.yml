@@ -3,6 +3,7 @@ name: ts-exit
 # خروجی آمریکا مستقیم روی رانر Actions با Tailscale (بدون هاپ Cloudflare)
 # پیش‌نیاز: سکرت TS_AUTHKEY (کلید احراز Tailscale از نوع Ephemeral + Reusable)
 # گوشی: اپ Tailscale/Aethery → لاگین همان اکانت → Use exit node → انتخاب این نود
+# زنجیرهٔ خودگردان: هر جاب قبل از پایان سقف ۳۵۰ دقیقه‌ای، جانشین بعدی را dispatch می‌کند
 
 on:
   workflow_dispatch:
@@ -18,6 +19,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   run:
@@ -52,7 +54,7 @@ jobs:
             > /tmp/tscaled.log 2>&1 &
           sleep 3
           HN="${{ github.event.inputs.hostname }}"
-          [ -z "$HN" ] && HN="gh-exit-$(hostname | cut -c1-6)"
+          [ -z "$HN" ] && HN="gh-exit"
           sudo tailscale --socket=/var/run/tailscale/tailscaled.sock up \
             --authkey="${{ secrets.TS_AUTHKEY }}" \
             --hostname="$HN" \
@@ -75,7 +77,9 @@ jobs:
           git commit -m "ts-exit: runner $PUB @ $(date -u +%FT%TZ)" || echo "nothing to commit"
           git push || echo "(push failed - فقط گزارش)"
 
-      - name: نگهبانی و زنده نگه داشتن (~۵.۵ ساعت)
+      - name: نگهبانی و زنده نگه داشتن + زنجیرهٔ خودگردان
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           TS="sudo tailscale --socket=/var/run/tailscale/tailscaled.sock"
           END=$((SECONDS + 20200))
@@ -91,11 +95,24 @@ jobs:
               sudo tailscaled --state=/var/lib/tailscale/ts.state --statedir=/var/lib/tailscale \
                 --socket=/var/run/tailscale/tailscaled.sock >> /tmp/tscaled.log 2>&1 &
               sleep 5
-              $TS up --authkey="${{ secrets.TS_AUTHKEY }}" --hostname="gh-exit-$(hostname | cut -c1-6)" \
+              $TS up --authkey="${{ secrets.TS_AUTHKEY }}" --hostname="gh-exit" \
                 --advertise-exit-node --accept-dns=false --accept-risk=lose-ssh 2>/dev/null || true
             else
               FAILS=0
             fi
             echo "[$(date -u +%T)] google=$CODE alive"
-            [ "$FAILS" -ge 10 ] && { echo "tailscaled مرده"; exit 1; }
+            if [ "$FAILS" -ge 10 ]; then
+              echo "tailscaled مرده — dispatch نود جانشین قبل از خروج"
+              gh workflow run ts-exit.yml --repo Rezzzz77/gh-exit -f hostname=gh-exit 2>/dev/null || true
+              exit 1
+            fi
+          done
+          # پایان دور نگهبانی — قبل از کشته‌شدن جاب، جانشین را dispatch کن
+          echo "⏳ پایان دور نگهبانی — dispatch نود بعدی..."
+          for i in 1 2 3; do
+            if gh workflow run ts-exit.yml --repo Rezzzz77/gh-exit -f hostname=gh-exit; then
+              echo "✅ نود جانشین dispatch شد — زنجیره ادامه دارد"
+              break
+            fi
+            echo "dispatch ناموفق (تلاش $i)"; sleep 10
           done
