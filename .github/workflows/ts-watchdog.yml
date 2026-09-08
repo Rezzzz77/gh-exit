@@ -6,10 +6,9 @@ name: ts-watchdog
 # نمی‌زند و نود از تیل‌نت حذف می‌شود (کلید ephemeral است).
 #
 # این نگهبان هر ۱۵ دقیقه نگاه می‌کند:
-#   ۱) اگر ران ts-exit در جریان است و جوان‌تر از ۴۰۰ دقیقه → همه‌چیز سالم، کاری نکن
+#   ۱) اگر ران ts-exit در جریان است و جوان‌تر از ۴۰۰ دقیقه → سالم، کاری نکن
 #   ۲) اگر ران در جریان ولی «زامبی» (بیش از ۴۰۰ دقیقه) → لغو و جاب تازه
-#   ۳) اگر هیچ رانی نیست → اگر آخرین ران تازه (<۱۵ دقیقه) شکسته بود صبر کن
-#      (جلوی لوپ سوختن دقیقه‌ها وقتی مثلاً authkey منقضی شده)، وگرنه جاب تازه بساز
+#   ۳) اگر هیچ رانی نیست → اگر آخرین ران تازه (<۱۵ دقیقه) شکسته بود صبر کن، وگرنه جاب تازه بساز
 #
 # نکته: نود تازه با hostname ثابت «gh-exit» ساخته می‌شود تا اسم نود در تیل‌نت
 # همیشه یکی باشد و انتخاب Exit Node روی گوشی معتبر بماند.
@@ -32,7 +31,34 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 6
     steps:
+      - name: اسکریپت‌های کمکی پایتون
+        shell: bash
+        run: |
+          cat > /tmp/ts_age.py <<'PYA'
+          import json,sys,datetime
+          rs = json.load(sys.stdin).get("workflow_runs", [])
+          if not rs:
+              print(0)
+          else:
+              t = max(datetime.datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) for r in rs)
+              print(int((datetime.datetime.now(datetime.timezone.utc) - t).total_seconds() // 60))
+          PYA
+          cat > /tmp/ts_guard.py <<'PYG'
+          import json,sys,datetime
+          rs = json.load(sys.stdin).get("workflow_runs", [])
+          if not rs:
+              raise SystemExit(0)
+          r = rs[0]
+          age = int((datetime.datetime.now(datetime.timezone.utc) - datetime.datetime.fromisoformat(r["updated_at"].replace("Z", "+00:00"))).total_seconds())
+          print("last completed run: %s — %d min ago" % (r.get("conclusion"), age // 60))
+          if r.get("conclusion") == "failure" and age < 900:
+              print("fresh failure - skip this cycle (loop guard).")
+              raise SystemExit(2)
+          PYG
+          echo "helper scripts ready"
+
       - name: بررسی نود و صدا زدن ts-exit در صورت نیاز
+        shell: bash
         env:
           PAT: ${{ secrets.GH_PAT }}
           REPO: ${{ github.repository }}
@@ -41,7 +67,6 @@ jobs:
           TOK="${PAT:-${{ github.token }}}"
           API="https://api.github.com/repos/$REPO/actions/workflows/ts-exit.yml/runs"
           auth=(-H "Authorization: Bearer $TOK" -H "Accept: application/vnd.github+json")
-          NOW=$(date -u +%s)
 
           count() {
             curl -s --max-time 20 "${auth[@]}" "$API?status=$1&per_page=10" \
@@ -52,54 +77,36 @@ jobs:
           echo "in_progress=$RUNNING queued=$QUEUED"
 
           if [ "$QUEUED" -gt 0 ]; then
-            echo "جابی در صف است — صبر می‌کنیم."
+            echo "a job is queued - wait."
             exit 0
           fi
 
           if [ "$RUNNING" -gt 0 ]; then
-            # زامبی‌چک: کهن‌ترین رانِ در جریان چند دقیقه عمر دارد؟
-            OLDEST=$(curl -s --max-time 20 "${auth[@]}" "$API?status=in_progress&per_page=5" | python3 -c '
-import json,sys,datetime
-rs=json.load(sys.stdin).get("workflow_runs",[])
-if not rs: print(0); raise SystemExit
-t=max(datetime.datetime.fromisoformat(r["created_at"].replace("Z","+00:00")) for r in rs)
-print(int((datetime.datetime.now(datetime.timezone.utc)-t).total_seconds()//60))
-')
+            curl -s --max-time 20 "${auth[@]}" "$API?status=in_progress&per_page=5" > /tmp/tsr.json
+            OLDEST=$(python3 /tmp/ts_age.py < /tmp/tsr.json)
             case "$OLDEST" in ''|*[!0-9]*) OLDEST=0;; esac
-            echo "کهن‌ترین ران در جریان: $OLDEST دقیقه"
+            echo "oldest running run: $OLDEST minutes"
             if [ "$OLDEST" -le 400 ]; then
-              echo "نود زنده است — کاری لازم نیست."
+              echo "node alive - nothing to do."
               exit 0
             fi
-            echo "ران زامبی (>۴۰۰ دقیقه) — لغو همهٔ ران‌های در جریان…"
-            IDS=$(curl -s --max-time 20 "${auth[@]}" "$API?status=in_progress&per_page=10" \
-              | grep -o '"id":[0-9]*' | cut -d: -f2)
+            echo "zombie run (>400 min) - cancelling all in-progress runs..."
+            IDS=$(grep -o '"id":[0-9]*' /tmp/tsr.json | cut -d: -f2)
             for id in $IDS; do
               curl -s -o /dev/null -X POST "${auth[@]}" \
                 "https://api.github.com/repos/$REPO/actions/runs/$id/cancel"
-              echo "  لغو ران $id"
+              echo "  cancelled run $id"
             done
             sleep 20
           fi
 
-          # محافظ شکست: اگر آخرین رانِ تمام‌شده کمتر از ۱۵ دقیقه پیش شکست خورده
-          # بود، دست نزن (مثلاً authkey منقضی است — دوباره نساز که دقیقه نسوزد)
-          LAST=$(curl -s --max-time 20 "${auth[@]}" "$API?status=completed&per_page=1")
-          echo "$LAST" | python3 -c '
-import json,sys,datetime
-rs=json.load(sys.stdin).get("workflow_runs",[])
-if not rs: raise SystemExit
-r=rs[0]
-age=int((datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(r["updated_at"].replace("Z","+00:00"))).total_seconds())
-print(f"آخرین ران تمام‌شده: {r[\"conclusion\"]} — {age//60} دقیقه پیش")
-if r.get("conclusion")=="failure" and age<900:
-    print("شکست تازه — این دور دست نمی‌زنیم (محافظ لوپ).")
-    raise SystemExit(2)
-' || exit 0
+          # loop guard: if the last completed ts-exit run failed <15 min ago, skip
+          curl -s --max-time 20 "${auth[@]}" "$API?status=completed&per_page=1" > /tmp/tsc.json
+          python3 /tmp/ts_guard.py < /tmp/tsc.json || exit 0
 
           C=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${auth[@]}" \
             -H "Content-Type: application/json" \
             -d '{"ref":"main","inputs":{"hostname":"gh-exit"}}' \
             "https://api.github.com/repos/$REPO/actions/workflows/ts-exit.yml/dispatches")
-          echo "نود تازه صدا زده شد: HTTP $C"
+          echo "fresh node dispatched: HTTP $C"
           [ "$C" = "204" ] || exit 1
