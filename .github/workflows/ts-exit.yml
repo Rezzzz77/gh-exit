@@ -64,7 +64,10 @@ jobs:
           echo "### وضعیت نود"
           sudo tailscale --socket=/var/run/tailscale/tailscaled.sock status
           echo "TS_IP=$(sudo tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)" >> "$GITHUB_ENV"
-
+          # تشخیص مسیر: مستقیم یا relay (برای مانیتورینگ پینگ/سرعت)
+          sudo tailscale --socket=/var/run/tailscale/tailscaled.sock status --json > /tmp/tsstatus.json 2>/dev/null || true
+          PYCODE='import json,time; d=json.load(open("/tmp/tsstatus.json")); peers=d.get("Peer",{}) or {}; me=d.get("Self",{}); out={"time":time.strftime("%FT%TZ",time.gmtime()),"self":{"online":me.get("Online"),"dnsName":(me.get("DNSName") or "").rstrip(".")},"peers":[{"name":(p.get("DNSName") or "").rstrip("."),"online":p.get("Online"),"relay":p.get("Relay"),"curAddr":p.get("CurAddr"),"addrs":p.get("Addrs") or [],"rxBytes":p.get("RxBytes"),"txBytes":p.get("TxBytes")} for k,p in peers.items()]}; print(json.dumps(out))'
+          python3 -c "$PYCODE" > ts_peer_status.txt 2>/dev/null || true
       - name: گزارش نود (IP عمومی رانر + IP تیل‌نت)
         run: |
           PUB=$(curl -s --max-time 10 https://api.ipify.org || echo '?')
@@ -73,7 +76,7 @@ jobs:
           echo "$PUB" > ts_public_ip.txt
           git config user.name  "ts-bot"
           git config user.email "ts-bot@users.noreply.github.com"
-          git add ts_public_ip.txt
+          git add ts_public_ip.txt ts_peer_status.txt 2>/dev/null || git add ts_public_ip.txt
           git commit -m "ts-exit: runner $PUB @ $(date -u +%FT%TZ)" || echo "nothing to commit"
           git push || echo "(push failed - فقط گزارش)"
 
