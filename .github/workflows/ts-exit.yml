@@ -1,0 +1,101 @@
+name: ts-exit
+
+# خروجی آمریکا مستقیم روی رانر Actions با Tailscale (بدون هاپ Cloudflare)
+# پیش‌نیاز: سکرت TS_AUTHKEY (کلید احراز Tailscale از نوع Ephemeral + Reusable)
+# گوشی: اپ Tailscale/Aethery → لاگین همان اکانت → Use exit node → انتخاب این نود
+
+on:
+  workflow_dispatch:
+    inputs:
+      hostname:
+        description: 'نام نود در Tailscale (خالی = خودکار)'
+        required: false
+        default: ''
+
+concurrency:
+  group: ts-exit-node
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # سقف جاب ۶ ساعت است؛ ۳۵۰ دقیقه حاشیه امن
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: آماده‌سازی TUN و IP forwarding
+        run: |
+          sudo modprobe tun 2>/dev/null || true
+          if [ ! -c /dev/net/tun ]; then
+            sudo mkdir -p /dev/net
+            sudo mknod /dev/net/tun c 10 200
+          fi
+          ls -l /dev/net/tun
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+      - name: نصب Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+          tailscale version
+
+      - name: اجرای tailscaled و اتصال به عنوان Exit Node
+        run: |
+          sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+          sudo setsid nohup tailscaled \
+            --state=/var/lib/tailscale/ts.state \
+            --statedir=/var/lib/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tscaled.log 2>&1 &
+          sleep 3
+          HN="${{ github.event.inputs.hostname }}"
+          [ -z "$HN" ] && HN="gh-exit-$(hostname | cut -c1-6)"
+          sudo tailscale --socket=/var/run/tailscale/tailscaled.sock up \
+            --authkey="${{ secrets.TS_AUTHKEY }}" \
+            --hostname="$HN" \
+            --advertise-exit-node \
+            --accept-dns=false \
+            --accept-risk=lose-ssh
+          echo "### وضعیت نود"
+          sudo tailscale --socket=/var/run/tailscale/tailscaled.sock status
+          echo "TS_IP=$(sudo tailscale --socket=/var/run/tailscale/tailscaled.sock ip -4)" >> "$GITHUB_ENV"
+
+      - name: گزارش نود (IP عمومی رانر + IP تیل‌نت)
+        run: |
+          PUB=$(curl -s --max-time 10 https://api.ipify.org || echo '?')
+          echo "🖥  Public IP رانر : $PUB"
+          echo "🔗  TS IP نود      : $TS_IP"
+          echo "$PUB" > ts_public_ip.txt
+          git config user.name  "ts-bot"
+          git config user.email "ts-bot@users.noreply.github.com"
+          git add ts_public_ip.txt
+          git commit -m "ts-exit: runner $PUB @ $(date -u +%FT%TZ)" || echo "nothing to commit"
+          git push || echo "(push failed - فقط گزارش)"
+
+      - name: نگهبانی و زنده نگه داشتن (~۵.۵ ساعت)
+        run: |
+          TS="sudo tailscale --socket=/var/run/tailscale/tailscaled.sock"
+          END=$((SECONDS + 20200))
+          FAILS=0
+          while [ $SECONDS -lt $END ]; do
+            sleep 60
+            # سلامت اتصال عمومی
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 12 https://www.google.com/generate_204 || echo 000)
+            # سلامت tailscaled
+            if ! $TS status >/dev/null 2>&1; then
+              FAILS=$((FAILS+1))
+              echo "[$(date -u +%T)] tailscaled پاسخ نمی‌دهد ($FAILS) — تلاش مجدد up"
+              sudo tailscaled --state=/var/lib/tailscale/ts.state --statedir=/var/lib/tailscale \
+                --socket=/var/run/tailscale/tailscaled.sock >> /tmp/tscaled.log 2>&1 &
+              sleep 5
+              $TS up --authkey="${{ secrets.TS_AUTHKEY }}" --hostname="gh-exit-$(hostname | cut -c1-6)" \
+                --advertise-exit-node --accept-dns=false --accept-risk=lose-ssh 2>/dev/null || true
+            else
+              FAILS=0
+            fi
+            echo "[$(date -u +%T)] google=$CODE alive"
+            [ "$FAILS" -ge 10 ] && { echo "tailscaled مرده"; exit 1; }
+          done
