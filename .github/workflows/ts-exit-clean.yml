@@ -84,7 +84,7 @@ jobs:
           echo "🖥 Public IP: $PUB_IP"
           echo "$PUB_IP" > ts_public_ip.txt
           git config user.name "ts-bot"
-          git config.user_email "ts-bot@users.noreply.github.com"
+          git config user.email "ts-bot@users.noreply.github.com"
           git add ts_public_ip.txt
           git commit -m "exit: $PUB_IP" || true
           git push || true
