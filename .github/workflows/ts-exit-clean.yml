@@ -1,14 +1,13 @@
 name: ts-exit-clean
 # تیل‌اسکیل خروجی خودکار — چرخه ۶ ساعته تمیز
 # - یک hostname ثابت (gh-exit)
-# - ephemeral: نود قدیمی به محض قطع اتصال حذف می‌شود
+# - authkey باید در پنل تیل‌اسکیل Ephemeral باشد تا نود قدیمی خودکار حذف شود
 # - keep-alive ~۵.۵ ساعت، بعد auto-chain به ران بعد
 # - concurrency جلوگیری از نود تکراری
 
 on:
   workflow_dispatch:
     inputs:
-      # مقادیر پیش‌فرض — فقط برای تست دستی؛ در چرخه خودکار از secrets استفاده می‌شود
       hostname:
         description: 'نام نود (ثابت بماند)'
         required: false
@@ -19,7 +18,7 @@ on:
 
 concurrency:
   group: ts-exit-clean
-  cancel-in-progress: false  # ران در حال اجرا بماند، جدید صف شود
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -28,7 +27,7 @@ permissions:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 340   # ۵ ساعت ۴۰ دقیقه (حاشیه از سقف ۶ ساعته گیتهاب)
+    timeout-minutes: 340
 
     steps:
       - name: Checkout
@@ -59,7 +58,6 @@ jobs:
           
           sudo mkdir -p /var/run/tailscale /var/lib/tailscale
           
-          # tailscaled در پس‌زمینه
           sudo setsid nohup tailscaled \
             --state=/var/lib/tailscale/ts.state \
             --statedir=/var/lib/tailscale \
@@ -69,14 +67,13 @@ jobs:
           
           TS="sudo tailscale --socket=/var/run/tailscale/tailscaled.sock"
           
-          # UP با ephemeral → نود قدیمی هنگام قطع خودکار حذف می‌شود
+          # نکته: برای نود ephemeral، AUTHKEY در پنل تیل‌اسکیل باید به‌عنوان Ephemeral ساخته شده باشد
           $TS up \
             --authkey="$AUTHKEY" \
             --hostname="$HOSTNAME" \
             --advertise-exit-node \
             --accept-dns=false \
-            --accept-risk=lose-ssh \
-            --ephemeral
+            --accept-risk=lose-ssh
           
           echo "=== Status ==="
           $TS status
@@ -87,7 +84,7 @@ jobs:
           echo "🖥 Public IP: $PUB_IP"
           echo "$PUB_IP" > ts_public_ip.txt
           git config user.name "ts-bot"
-          git config user.email "ts-bot@users.noreply.github.com"
+          git config.user_email "ts-bot@users.noreply.github.com"
           git add ts_public_ip.txt
           git commit -m "exit: $PUB_IP" || true
           git push || true
@@ -101,7 +98,7 @@ jobs:
           AUTHKEY="${{ github.event.inputs.authkey || secrets.TS_AUTHKEY }}"
           TS="sudo tailscale --socket=/var/run/tailscale/tailscaled.sock"
           
-          END=$((SECONDS + 19800))   # 5.5 ساعت = 19800 ثانیه
+          END=$((SECONDS + 19800))
           FAILS=0
           
           while [ $SECONDS -lt $END ]; do
@@ -116,8 +113,7 @@ jobs:
                 --authkey="$AUTHKEY" \
                 --hostname="$HOSTNAME" \
                 --advertise-exit-node \
-                --accept-dns=false \
-                --ephemeral
+                --accept-dns=false
             else
               FAILS=0
             fi
