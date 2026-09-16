@@ -1,0 +1,150 @@
+name: ts-exit-clean
+# تیل‌اسکیل خروجی خودکار — چرخه ۶ ساعته تمیز
+# - یک hostname ثابت (gh-exit)
+# - ephemeral: نود قدیمی به محض قطع اتصال حذف می‌شود
+# - keep-alive ~۵.۵ ساعت، بعد auto-chain به ران بعد
+# - concurrency جلوگیری از نود تکراری
+
+on:
+  workflow_dispatch:
+    inputs:
+      # مقادیر پیش‌فرض — فقط برای تست دستی؛ در چرخه خودکار از secrets استفاده می‌شود
+      hostname:
+        description: 'نام نود (ثابت بماند)'
+        required: false
+        default: 'gh-exit'
+      authkey:
+        description: 'Auth Key (از Secrets خوانده می‌شود)'
+        required: false
+
+concurrency:
+  group: ts-exit-clean
+  cancel-in-progress: false  # ران در حال اجرا بماند، جدید صف شود
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340   # ۵ ساعت ۴۰ دقیقه (حاشیه از سقف ۶ ساعته گیتهاب)
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup TUN
+        run: |
+          sudo modprobe tun 2>/dev/null || true
+          if [ ! -c /dev/net/tun ]; then
+            sudo mkdir -p /dev/net
+            sudo mknod /dev/net/tun c 10 200
+          fi
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1
+
+      - name: Install Tailscale
+        run: curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Start Exit Node
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          HOSTNAME="${{ github.event.inputs.hostname || 'gh-exit' }}"
+          AUTHKEY="${{ github.event.inputs.authkey || secrets.TS_AUTHKEY }}"
+          
+          [ -n "$AUTHKEY" ] || { echo "❌ TS_AUTHKEY خالی است"; exit 1; }
+          
+          sudo mkdir -p /var/run/tailscale /var/lib/tailscale
+          
+          # tailscaled در پس‌زمینه
+          sudo setsid nohup tailscaled \
+            --state=/var/lib/tailscale/ts.state \
+            --statedir=/var/lib/tailscale \
+            --socket=/var/run/tailscale/tailscaled.sock \
+            > /tmp/tscaled.log 2>&1 &
+          sleep 5
+          
+          TS="sudo tailscale --socket=/var/run/tailscale/tailscaled.sock"
+          
+          # UP با ephemeral → نود قدیمی هنگام قطع خودکار حذف می‌شود
+          $TS up \
+            --authkey="$AUTHKEY" \
+            --hostname="$HOSTNAME" \
+            --advertise-exit-node \
+            --accept-dns=false \
+            --accept-risk=lose-ssh \
+            --ephemeral
+          
+          echo "=== Status ==="
+          $TS status
+
+      - name: Report Public IP
+        run: |
+          PUB_IP=$(curl -s --max-time 10 https://api.ipify.org)
+          echo "🖥 Public IP: $PUB_IP"
+          echo "$PUB_IP" > ts_public_ip.txt
+          git config user.name "ts-bot"
+          git config user.email "ts-bot@users.noreply.github.com"
+          git add ts_public_ip.txt
+          git commit -m "exit: $PUB_IP" || true
+          git push || true
+
+      - name: Keep Alive (5h30m)
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          HOSTNAME="${{ github.event.inputs.hostname || 'gh-exit' }}"
+          AUTHKEY="${{ github.event.inputs.authkey || secrets.TS_AUTHKEY }}"
+          TS="sudo tailscale --socket=/var/run/tailscale/tailscaled.sock"
+          
+          END=$((SECONDS + 19800))   # 5.5 ساعت = 19800 ثانیه
+          FAILS=0
+          
+          while [ $SECONDS -lt $END ]; do
+            sleep 60
+            if ! $TS status >/dev/null 2>&1; then
+              FAILS=$((FAILS+1))
+              echo "⚠️  Tailscale down (fail $FAILS) — reconnecting..."
+              sudo tailscaled --state=/var/lib/tailscale/ts.state \
+                --socket=/var/run/tailscale/tailscaled.sock &
+              sleep 5
+              $TS up \
+                --authkey="$AUTHKEY" \
+                --hostname="$HOSTNAME" \
+                --advertise-exit-node \
+                --accept-dns=false \
+                --ephemeral
+            else
+              FAILS=0
+            fi
+            echo "[$(date -u +%T)] alive"
+            [ "$FAILS" -ge 10 ] && { echo "❌ Too many failures"; exit 1; }
+          done
+          
+          echo "✅ Keep-alive completed normally"
+
+      - name: Auto Chain Next Run
+        if: always()
+        env:
+          TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+        run: |
+          set -euo pipefail
+          echo "🔄 Dispatching next run..."
+          HOSTNAME="${{ github.event.inputs.hostname || 'gh-exit' }}"
+          AUTHKEY="${{ github.event.inputs.authkey || secrets.TS_AUTHKEY }}"
+          
+          curl -s -X POST \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/ts-exit-clean.yml/dispatches" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d "{
+              \"ref\": \"main\",
+              \"inputs\": {
+                \"hostname\": \"$HOSTNAME\",
+                \"authkey\": \"$AUTHKEY\"
+              }
+            }" && echo "✅ Next run dispatched" || echo "❌ Dispatch failed"
